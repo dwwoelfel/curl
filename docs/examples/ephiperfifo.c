@@ -95,6 +95,8 @@ typedef struct _ConnInfo
   char *url;
   GlobalInfo *global;
   char error[CURL_ERROR_SIZE];
+  size_t download;
+  int paused_progress_count;
 } ConnInfo;
 
 
@@ -330,10 +332,20 @@ static int sock_cb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp)
 
 
 /* CURLOPT_WRITEFUNCTION */
-static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *data)
+static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *p)
 {
+  ConnInfo *conn = (ConnInfo *)p;
   (void)ptr;
-  (void)data;
+  if (conn->download > 1048576 && conn->paused_progress_count == 0) {
+    fprintf(MSG_OUT,
+           "pausing download downloadbytes=%d, paused_progress_count=%d\n",
+           conn->download,
+           conn->paused_progress_count);
+    conn->paused_progress_count = conn->paused_progress_count + 1;
+    return CURL_WRITEFUNC_PAUSE;
+  }
+  conn->download = conn->download + (size * nmemb);
+  fprintf(MSG_OUT, "conn download %d, size=%d\n", conn->download, size * nmemb);
   return size * nmemb;
 }
 
@@ -346,7 +358,17 @@ static int prog_cb(void *p, double dltotal, double dlnow, double ult,
   (void)ult;
   (void)uln;
 
-  fprintf(MSG_OUT, "Progress: %s (%g/%g)\n", conn->url, dlnow, dltotal);
+  if (conn->paused_progress_count > 0) {
+    conn->paused_progress_count = conn->paused_progress_count + 1;
+    if (conn->paused_progress_count > 10) {
+      fprintf(MSG_OUT, "unpause");
+      curl_easy_pause(conn->easy, CURLPAUSE_CONT);
+    }
+  }
+
+
+  fprintf(MSG_OUT, "Progress: %s (%g/%g) paused_progress_count=%d\n", conn->url, dlnow, dltotal, conn->paused_progress_count);
+
   return 0;
 }
 
@@ -367,6 +389,8 @@ static void new_conn(char *url, GlobalInfo *g)
   }
   conn->global = g;
   conn->url = strdup(url);
+  conn->download = 0;
+  conn->paused_progress_count = 0;
   curl_easy_setopt(conn->easy, CURLOPT_URL, conn->url);
   curl_easy_setopt(conn->easy, CURLOPT_WRITEFUNCTION, write_cb);
   curl_easy_setopt(conn->easy, CURLOPT_WRITEDATA, conn);
@@ -377,8 +401,8 @@ static void new_conn(char *url, GlobalInfo *g)
   curl_easy_setopt(conn->easy, CURLOPT_PROGRESSFUNCTION, prog_cb);
   curl_easy_setopt(conn->easy, CURLOPT_PROGRESSDATA, conn);
   curl_easy_setopt(conn->easy, CURLOPT_FOLLOWLOCATION, 1L);
-  curl_easy_setopt(conn->easy, CURLOPT_LOW_SPEED_TIME, 3L);
-  curl_easy_setopt(conn->easy, CURLOPT_LOW_SPEED_LIMIT, 10L);
+  //curl_easy_setopt(conn->easy, CURLOPT_LOW_SPEED_TIME, 3L);
+  //curl_easy_setopt(conn->easy, CURLOPT_LOW_SPEED_LIMIT, 10L);
   fprintf(MSG_OUT,
           "Adding easy %p to multi %p (%s)\n", conn->easy, g->multi, url);
   rc = curl_multi_add_handle(g->multi, conn->easy);
@@ -505,6 +529,9 @@ int main(int argc, char **argv)
 
   /* we do not call any curl_multi_socket*() function yet as we have no handles
      added! */
+
+  // Run a download immediately
+  new_conn("https://curl.se/download/curl-7.83.1.zip", &g);
 
   fprintf(MSG_OUT, "Entering wait loop\n");
   fflush(MSG_OUT);
